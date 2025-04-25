@@ -46,8 +46,4 @@ java -jar target/webhook-app-0.0.1-SNAPSHOT.jar
 - The application will retry failed requests up to 4 times
 - Exponential backoff is implemented with a base delay of 1 second
 
-## JAR Download
-You can download the latest JAR from the [Releases](https://github.com/yourusername/bajaj-finserv-challenge/releases) page.
 
-## License
-MIT License 
