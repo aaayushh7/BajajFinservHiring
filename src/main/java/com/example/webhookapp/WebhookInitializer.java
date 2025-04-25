@@ -13,6 +13,11 @@ public class WebhookInitializer {
 
     @PostConstruct
     public void initialize() {
-        webhookService.processWebhook();
+        try {
+            webhookService.processWebhook();
+        } catch (Exception e) {
+            System.err.println("Failed to process webhook: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 } 

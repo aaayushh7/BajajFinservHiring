@@ -3,19 +3,21 @@ package com.example.webhookapp.service;
 import com.example.webhookapp.model.GenerateWebhookRequest;
 import com.example.webhookapp.model.GenerateWebhookResponse;
 import com.example.webhookapp.model.GenerateWebhookResponse.User;
-import com.example.webhookapp.model.GenerateWebhookResponse.UsersData;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 
 import java.util.*;
@@ -25,33 +27,45 @@ import java.util.*;
 @RequiredArgsConstructor
 public class WebhookService {
 
+    private static final Logger logger = LoggerFactory.getLogger(WebhookService.class);
+    private static final String BASE_URL = "https://bfhldevapigw.healthrx.co.in/hiring";
     private final WebClient webClient;
 
+    @Retryable(
+        value = {WebClientResponseException.TooManyRequests.class},
+        maxAttempts = 3,
+        backoff = @Backoff(delay = 2000, multiplier = 2)
+    )
     public void processWebhook() {
-        generateWebhookToken()
-            .flatMap(response -> {
-                String accessToken = response.getAccessToken();
-                log.info("Generated access token: {}", accessToken);
-     
-                // Step 2: Get users data
-                return getUsersData(accessToken)
-                    .flatMap(usersData -> {
-                        // Step 3: Solve the problem
-                        List<List<Integer>> solution = solveProblem(usersData);
-                        log.info("Solution: {}", solution);
-                        
-                        // Step 4: Send solution to webhook
-                        return sendSolutionToWebhook(accessToken, solution);
-                    });
-            })
-            .block();
+        try {
+            logger.info("Starting webhook processing...");
+            
+            // Generate webhook token
+            GenerateWebhookResponse response = generateWebhookToken();
+            logger.info("Successfully generated webhook token");
+            
+            // Get access token from response
+            String accessToken = response.getAccessToken();
+            logger.info("Generated access token: {}", accessToken);
+            
+            // Get users from response and solve the problem
+            List<User> users = response.getData().getUsers().getUsers();
+            List<List<Integer>> solution = solveProblem(users);
+            logger.info("Solution: {}", solution);
+            
+            // Send solution to webhook
+            sendSolutionToWebhook(accessToken, solution);
+            
+        } catch (WebClientResponseException.TooManyRequests e) {
+            logger.error("Rate limit exceeded. Retrying with backoff...", e);
+            throw e;
+        } catch (Exception e) {
+            logger.error("Error in webhook processing: {}", e.getMessage(), e);
+            throw e;
+        }
     }
 
-    @Retryable(
-        maxAttempts = 3,
-        backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    public Mono<GenerateWebhookResponse> generateWebhookToken() {
+    private GenerateWebhookResponse generateWebhookToken() {
         GenerateWebhookRequest request = GenerateWebhookRequest.builder()
             .name("Ayush Tiwari")
             .regNo("RA2211003010305")
@@ -64,91 +78,35 @@ public class WebhookService {
             .bodyValue(request)
             .retrieve()
             .bodyToMono(GenerateWebhookResponse.class)
-            .doOnError(error -> log.error("Error generating webhook token: {}", error.getMessage()))
-            .doOnSuccess(response -> log.info("Successfully generated webhook token"));
+            .block();
     }
 
-    @Retryable(
-        maxAttempts = 3,
-        backoff = @Backoff(delay = 1000, multiplier = 2)
-    )
-    public Mono<UsersData> getUsersData(String accessToken) {
-        return webClient.get()
-            .uri("/users")
-            .header(HttpHeaders.AUTHORIZATION, accessToken)
-            .retrieve()
-            .bodyToMono(UsersData.class)
-            .doOnError(error -> log.error("Error getting users data: {}", error.getMessage()))
-            .doOnSuccess(response -> log.info("Successfully got users data"));
-    }
-
-    public List<List<Integer>> solveProblem(UsersData usersData) {
-        List<User> users = usersData.getUsers();
-        int findId = usersData.getFindId();
-        int n = usersData.getN();
-
-        // Create a map for quick user lookup
+    public List<List<Integer>> solveProblem(List<User> users) {
+        logger.debug("Input users: {}", users);
         Map<Integer, User> userMap = new HashMap<>();
         for (User user : users) {
             userMap.put(user.getId(), user);
         }
+        logger.debug("User map: {}", userMap);
 
-        // Find all users reachable within n steps from findId using BFS
-        Set<Integer> reachableUsers = new HashSet<>();
-        Queue<Integer> queue = new LinkedList<>();
-        Map<Integer, Integer> distance = new HashMap<>();
-
-        queue.add(findId);
-        distance.put(findId, 0);
-        reachableUsers.add(findId);
-
-        while (!queue.isEmpty()) {
-            int current = queue.poll();
-            int currentDistance = distance.get(current);
-
-            if (currentDistance >= n) {
-                continue;
-            }
-
-            User currentUser = userMap.get(current);
-            if (currentUser == null) {
-                continue;
-            }
-
-            for (int followId : currentUser.getFollows()) {
-                if (!distance.containsKey(followId)) {
-                    distance.put(followId, currentDistance + 1);
-                    reachableUsers.add(followId);
-                    queue.add(followId);
-                }
-            }
-        }
-
-        // Find all pairs of users who follow each other
         List<List<Integer>> result = new ArrayList<>();
-        for (int userId : reachableUsers) {
-            User user = userMap.get(userId);
-            if (user == null) {
-                continue;
-            }
-
+        for (User user : users) {
+            logger.debug("Processing user: {}", user);
             for (int followId : user.getFollows()) {
-                if (reachableUsers.contains(followId)) {
-                    User followedUser = userMap.get(followId);
-                    if (followedUser != null && followedUser.getFollows().contains(userId)) {
-                        // Found a mutual follow
-                        List<Integer> pair = new ArrayList<>();
-                        pair.add(Math.min(userId, followId));
-                        pair.add(Math.max(userId, followId));
-                        if (!result.contains(pair)) {
-                            result.add(pair);
-                        }
+                User followedUser = userMap.get(followId);
+                logger.debug("Checking if user {} follows back user {}", followId, user.getId());
+                if (followedUser != null && followedUser.getFollows().contains(user.getId())) {
+                    List<Integer> pair = new ArrayList<>();
+                    pair.add(Math.min(user.getId(), followId));
+                    pair.add(Math.max(user.getId(), followId));
+                    if (!result.contains(pair)) {
+                        result.add(pair);
+                        logger.debug("Found mutual follow pair: {}", pair);
                     }
                 }
             }
         }
 
-        // Sort the result
         result.sort((a, b) -> {
             if (a.get(0) != b.get(0)) {
                 return a.get(0) - b.get(0);
